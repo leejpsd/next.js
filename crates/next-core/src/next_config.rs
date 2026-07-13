@@ -1146,6 +1146,9 @@ const DEFAULT_WEIGHT_DISTRIBUTION: f32 = 0.1;
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ChunkingHeuristicsConfig {
+    /// Groups of pages commonly visited together, each defined by a list of regular expressions
+    /// matched against the route pathname. The cluster ID is the index in this list.
+    clusters: Option<Vec<Vec<RegexComponents>>>,
     /// A number between `0.0..=1.0`. Higher values weight the benefit of merging
     /// chunks for a single page load more heavily. A site's bounce rate is a good
     /// approximation if you don't have a better value.
@@ -1165,6 +1168,8 @@ pub struct ChunkingHeuristicsConfig {
 
 #[turbo_tasks::value]
 pub struct ChunkingHeuristics {
+    /// The route-matching regexes for each user-defined cluster.
+    clusters: Vec<Vec<EsRegex>>,
     /// First-page-load priority as an integer percentage (`0..=100`), or `None` if unset.
     pub first_page_load_priority: Option<u32>,
     /// Route-matching regexes for priority routes.
@@ -1178,20 +1183,30 @@ pub struct ChunkingHeuristics {
 
 impl ChunkingHeuristics {
     /// Compute the [`EntryHeuristics`] for a route `pathname` by matching it against the configured
-    /// priority-route regexes.
+    /// cluster and priority-route regexes.
     pub fn entry_heuristics_for(&self, pathname: &str) -> EntryHeuristics {
-        let high_priority = self
-            .priority_routes
+        // Match `pathname` against a group of regexes.
+        let matches_any = |regexes: &[EsRegex]| {
+            regexes
+                .iter()
+                .filter(|regex| regex.as_regex_str().is_none())
+                .any(|regex| regex.is_match(pathname))
+                || regex::RegexSet::new(regexes.iter().filter_map(|regex| regex.as_regex_str()))
+                    .is_ok_and(|set| set.is_match(pathname))
+        };
+
+        let clusters = self
+            .clusters
             .iter()
-            .filter(|regex| regex.as_regex_str().is_none())
-            .any(|regex| regex.is_match(pathname))
-            || regex::RegexSet::new(
-                self.priority_routes
-                    .iter()
-                    .filter_map(|regex| regex.as_regex_str()),
-            )
-            .is_ok_and(|set| set.is_match(pathname));
-        EntryHeuristics { high_priority }
+            .enumerate()
+            .filter(|(_, regexes)| matches_any(regexes))
+            .map(|(index, _)| index as u16)
+            .collect();
+        let high_priority = matches_any(&self.priority_routes);
+        EntryHeuristics {
+            clusters,
+            high_priority,
+        }
     }
 }
 
@@ -2095,12 +2110,19 @@ impl NextConfig {
     #[turbo_tasks::function]
     pub fn chunking_heuristics(&self) -> Result<Vc<ChunkingHeuristics>> {
         let config = self.experimental.turbopack_chunking_heuristics.as_ref();
+        let clusters = config
+            .and_then(|c| c.clusters.as_deref())
+            .unwrap_or_default()
+            .iter()
+            .map(|patterns| parse_route_regexes(patterns))
+            .collect::<Result<Vec<_>>>()?;
         let priority_routes = parse_route_regexes(
             config
                 .and_then(|c| c.priority_routes.as_deref())
                 .unwrap_or_default(),
         )?;
         Ok(ChunkingHeuristics {
+            clusters,
             first_page_load_priority: config
                 .and_then(|c| c.first_page_load_priority)
                 .map(|priority| (priority.clamp(0.0, 1.0) * 100.0).round() as u32),

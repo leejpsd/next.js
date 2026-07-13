@@ -388,6 +388,7 @@ export const experimentalSchema = {
   turbopackScopeHoisting: z.boolean().optional(),
   turbopackChunkingHeuristics: z
     .object({
+      clusters: z.array(z.array(z.instanceof(RegExp))).optional(),
       firstPageLoadPriority: z.number().min(0).max(1).optional(),
       priorityRoutes: z.array(z.instanceof(RegExp)).optional(),
       priorityBoost: z.number().min(1).optional(),
