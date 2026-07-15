@@ -177,8 +177,9 @@ pub trait MergeableModule: Module {
         Vc::cell(true)
     }
 
-    /// Whether the module is ESM or CommonJS. Only modules of the same kind are merged
-    /// into a group, as mixing them requires interop between the two export shapes.
+    /// Whether the module is ESM or CommonJS. Modules of any kind can be merged into
+    /// one group; this drives interop when they're mixed (e.g. a CommonJS module
+    /// imported by an ESM module must expose its exports namespace).
     #[turbo_tasks::function]
     fn merge_kind(self: Vc<Self>) -> Vc<MergeableModuleKind> {
         MergeableModuleKind::EcmaScript.cell()
