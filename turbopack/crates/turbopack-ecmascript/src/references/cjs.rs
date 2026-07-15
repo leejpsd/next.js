@@ -346,6 +346,58 @@ impl CjsRequireAssetReferenceCodeGen {
             }
         }
 
+        // If the target is in this scope-hoisting group, replace `require(...)` with a
+        // `__turbopack_merged_module__(i[, <value>])` marker: the merge inlines the target's
+        // body and, for a value-position require, substitutes `<value>` for the call.
+        if let ReferencedAsset::Some(asset) =
+            ReferencedAsset::from_resolve_result(self.reference.resolve_reference()).await?
+            && let Some(index) = scope_hoisting_context.get_module_index(asset)
+            && let Some(ctxt) = scope_hoisting_context.get_module_syntax_context(asset)
+        {
+            // A bare `require(...)` statement (not a binding initializer) discards its
+            // result, so inline the body only (one-arg marker); a value-position require
+            // also substitutes a `<value>` for the call.
+            let is_bare_statement = !self
+                .path
+                .iter()
+                .any(|kind| matches!(kind, AstParentKind::VarDeclarator(_)));
+
+            let id: Expr = Lit::Num(index.into()).into();
+            let marker = if is_bare_statement {
+                Some(quote!(
+                    "__turbopack_merged_module__($id)" as Expr,
+                    id: Expr = id,
+                ))
+            } else {
+                let value = match &*asset.get_exports().await? {
+                    // Static CommonJS: `<value>` is an object of the read exports referencing
+                    // the target's per-export locals (the minifier collapses it to direct
+                    // bindings).
+                    EcmascriptExports::CommonJs(_) | EcmascriptExports::EmptyCommonJs => {
+                        Some(cjs_exports_object(
+                            &referenced_export_names(&reference.usage, asset).await?,
+                            ctxt,
+                        ))
+                    }
+                    // Not statically inlinable; keep the runtime require.
+                    _ => None,
+                };
+                value.map(|value| {
+                    quote!(
+                        "__turbopack_merged_module__($id, $value)" as Expr,
+                        id: Expr = id,
+                        value: Expr = value,
+                    )
+                })
+            };
+            if let Some(marker) = marker {
+                let visitor = create_visitor!(self.path, visit_mut_expr, |expr: &mut Expr| {
+                    *expr = marker.clone();
+                });
+                return Ok(CodeGeneration::visitors(vec![visitor]));
+            }
+        }
+
         let pm = PatternMapping::resolve_request(
             *reference.request,
             *reference.origin,
