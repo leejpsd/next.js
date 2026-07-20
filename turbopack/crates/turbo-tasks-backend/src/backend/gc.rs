@@ -27,15 +27,10 @@ use crate::backend::{
     storage_schema::TaskStorageAccessors,
 };
 
-/// One unit of GC work: collect a single task. Parallelism is *across* tasks (the unbounded pool in
-/// [`TurboTasksBackend::gc_collect`] runs many jobs on different workers); each task's own teardown
-/// is sequential. Collecting a task can discover more jobs — a child the cleanup drives to
-/// `parent_count == 0` that is itself collectible — which flow straight back into the pool.
-struct GcJob(TaskId);
-
 /// Observability counters for one [`TurboTasksBackend::gc_collect`] pass.
-#[derive(Default)]
 pub(crate) struct GcStats {
+    /// Total number of gc roots
+    pub gc_roots: usize,
     /// Tasks collected (marked soft-deleted).
     pub collected: usize,
     /// Edges torn down across all collected tasks (children + forward-dependency reverse edges).
@@ -111,15 +106,7 @@ impl TurboTasksBackend {
         // commit a `get_or_create_task` for the same type could re-mint the id, and the id must not
         // be handed out while any live `OperationVc`/`DetachedVc` still references it. Feed the
         // recycled ids into `persisted_task_id_factory` so the high-water mark can stop growing.
-        let seeds: Vec<GcJob> = self
-            .storage
-            .gc_collectible_candidates()
-            .into_iter()
-            .map(GcJob)
-            .collect();
-        if seeds.is_empty() {
-            return GcStats::default();
-        }
+        let (roots_found, seeds) = self.storage.gc_collectible_candidates();
 
         // Written once per collected task (not per child/dep), so the atomics are not a hot path.
         let collected = AtomicUsize::new(0);
@@ -128,7 +115,7 @@ impl TurboTasksBackend {
         // Each job builds its own GC `ExecuteContext`; see the doc above for the concurrency
         // argument. A job may spawn follow-up jobs (children driven to `parent_count == 0`) that
         // flow straight back into the same pool.
-        scope_unbounded(seeds, |spawner, GcJob(task_id)| {
+        scope_unbounded(seeds, |spawner, task_id| {
             let mut ctx = self.execute_context_gc(turbo_tasks);
             // `All` restores Data so the edge capture below can read the Data-category dep sets.
             // The collect target came from the resident-map scan, so it must exist.
@@ -210,12 +197,13 @@ impl TurboTasksBackend {
                 // The child had its `parent_count` decremented during this task's cleanup, so it is
                 // resident.
                 if ctx.task(child, TaskDataCategory::Meta).is_gc_collectible() {
-                    spawner.spawn(GcJob(child));
+                    spawner.spawn(child);
                 }
             }
         });
 
         GcStats {
+            gc_roots: roots_found,
             collected: collected.into_inner(),
             edges_deleted: edges_deleted.into_inner(),
         }

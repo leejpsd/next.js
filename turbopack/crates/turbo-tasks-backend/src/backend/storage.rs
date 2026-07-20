@@ -272,10 +272,16 @@ impl Storage {
     /// Mark a newly allocated task as restored (skip DB queries) and new (include in persistence
     /// snapshots). Optionally sets the `persistent_task_type` eagerly so it's available for
     /// persistence snapshots without needing to propagate it through `connect_child`.
-    pub fn initialize_new_task(&self, task_id: TaskId, task_type: Option<CachedTaskTypeArc>) {
+    pub fn initialize_new_task(
+        &self,
+        task_id: TaskId,
+        task_type: Option<CachedTaskTypeArc>,
+        is_gc_root: bool,
+    ) {
         let mut task = self.access_mut(task_id);
         task.flags.set_restored(TaskDataCategory::All);
         task.flags.set_new_task(true);
+        task.flags.set_gc_root(is_gc_root);
         if let Some(task_type) = task_type {
             task.set_persistent_task_type(task_type);
             if !task_id.is_transient() {
@@ -568,21 +574,30 @@ impl Storage {
     /// Parallelized across shards like [`Self::evict_after_snapshot`]: one job per shard scans it
     /// under its own read lock and returns that shard's candidates, which are flattened into a
     /// single list.
-    pub fn gc_collectible_candidates(&self) -> Vec<TaskId> {
-        let per_shard: Vec<Vec<TaskId>> = parallel::map_collect(self.map.shards(), |shard| {
+    pub fn gc_collectible_candidates(&self) -> (usize, impl IntoIterator<Item = TaskId>) {
+        let per_shard: Vec<_> = parallel::map_collect(self.map.shards(), |shard| {
             let shard = shard.read();
             let mut candidates = Vec::new();
+            let mut roots_found = 0usize;
             // SAFETY: we hold the shard read lock for the duration of iteration.
             for bucket in unsafe { shard.iter() } {
                 // SAFETY: the read lock guard outlives the bucket reference.
                 let (task_id, shared_value) = unsafe { bucket.as_ref() };
-                if !task_id.is_transient() && shared_value.get().gc_maybe_collectible() {
-                    candidates.push(*task_id);
+                if !task_id.is_transient() {
+                    if shared_value.get().gc_maybe_collectible() {
+                        candidates.push(*task_id);
+                    } else if shared_value.get().flags.gc_root() {
+                        roots_found += 1;
+                    }
                 }
             }
-            candidates
+            (candidates, roots_found)
         });
-        per_shard.into_iter().flatten().collect()
+        let total: usize = per_shard.iter().map(|(_, r)| *r).sum();
+        (
+            total,
+            per_shard.into_iter().map(|(t, _)| t.into_iter()).flatten(),
+        )
     }
 
     pub fn access_pair_mut(
