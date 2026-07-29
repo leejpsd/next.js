@@ -364,21 +364,6 @@ impl DiskWatcher {
         }
     }
 
-    /// Create a watcher and start watching by creating `debounced` watcher
-    /// via `full debouncer`
-    ///
-    /// `notify` provides 2 different debouncer implementations, `-full`
-    /// provides below differences for the easy of use:
-    ///
-    /// - Only emits a single Rename event if the rename From and To events can be matched
-    /// - Merges multiple Rename events
-    /// - Takes Rename events into account and updates paths for events that occurred before the
-    ///   rename event, but which haven't been emitted, yet
-    /// - Optionally keeps track of the file system IDs all files and stitches rename events
-    ///   together (FSevents, Windows)
-    /// - Emits only one Remove event when deleting a directory (inotify)
-    /// - Doesn't emit duplicate create events
-    /// - Doesn't emit Modify events after a Create event
     pub async fn start_watching<FsApi: DiskFileSystemWatcherApi>(
         fs: Arc<FsApi>,
         report_invalidation_reason: bool,
