@@ -24,6 +24,7 @@ describe('request-insights-route-preparation', () => {
   }
 
   const routePreparationSpanType = 'DevRouteMatcherManager.ensureRoute'
+  const routeCompilationSpanType = 'DevBundlerService.ensurePage'
 
   async function getRequestInsights() {
     return (await next
@@ -62,6 +63,10 @@ describe('request-insights-route-preparation', () => {
           insight.spans.some(
             (span) =>
               span.attributes?.['next.span_type'] === routePreparationSpanType
+          ) &&
+          insight.spans.some(
+            (span) =>
+              span.attributes?.['next.span_type'] === routeCompilationSpanType
           )
       )
 
@@ -120,6 +125,32 @@ describe('request-insights-route-preparation', () => {
       }
       expect(ancestor?.spanId).toBe(rootSpan?.spanId)
     }
+
+    const routePreparationSpan = routePreparationSpans[0]
+    const routeCompilationSpans = request.spans.filter(
+      (span) =>
+        span.attributes?.['next.span_type'] === routeCompilationSpanType &&
+        span.parentSpanId === routePreparationSpan.spanId
+    )
+    expect(routeCompilationSpans).toHaveLength(1)
+
+    const routeCompilationSpan = routeCompilationSpans[0]
+    expect(routeCompilationSpan).toEqual(
+      expect.objectContaining({
+        name: 'compile route',
+        durationMs: expect.any(Number),
+        status: 'ok',
+        parentSpanId: routePreparationSpan.spanId,
+        attributes: {
+          'next.span_category': 'nextjs',
+          'next.span_name': 'compile route',
+          'next.span_type': routeCompilationSpanType,
+        },
+      })
+    )
+    expect(Number.isFinite(routeCompilationSpan.durationMs)).toBe(true)
+    expect(routeCompilationSpan.durationMs).toBeGreaterThanOrEqual(0)
+    expect(routeCompilationSpan.traceId).toBe(rootSpan?.traceId)
   }
 
   it('records route preparation for first and subsequent App Page requests', async () => {
