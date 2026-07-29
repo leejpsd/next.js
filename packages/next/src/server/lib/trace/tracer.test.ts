@@ -30,6 +30,7 @@ import {
   NextNodeServerSpan,
   NodeSpan,
 } from './constants'
+import { createOneShotTracePhase } from './phase'
 import { SpanKind, SpanStatusCode, getTracer } from './tracer'
 
 const customContextKey = createContextKey('next.tracer.test.custom-context')
@@ -199,6 +200,86 @@ describe('local span recording', () => {
 
     expect(result).toBe('result')
     expect(getSpanRecords()).toEqual([])
+  })
+
+  it('does not create internal phases when their recording modes are disabled', () => {
+    const finishPhase = createOneShotTracePhase(
+      AppRenderSpan.initializeRender,
+      'initialize app render'
+    )
+
+    finishPhase()
+
+    expect(getSpanRecords()).toEqual([])
+  })
+
+  it('records a one-shot phase with its captured parent and elapsed timing', () => {
+    process.env.__NEXT_REQUEST_INSIGHTS = 'true'
+    let finishPhase: ReturnType<typeof createOneShotTracePhase>
+
+    getTracer().trace(BaseServerSpan.render, () => {
+      finishPhase = createOneShotTracePhase(
+        AppRenderSpan.initializeRender,
+        'initialize app render'
+      )
+    })
+
+    finishPhase!()
+    finishPhase!()
+
+    const parentSpan = getSpanRecords({ name: BaseServerSpan.render })[0]
+    const phaseSpans = getSpanRecords({ name: 'initialize app render' })
+    expect(phaseSpans).toHaveLength(1)
+    expect(phaseSpans[0]).toEqual(
+      expect.objectContaining({
+        startTime: expect.any(Number),
+        durationMs: expect.any(Number),
+        parentSpanId: parentSpan.spanId,
+        status: 'ok',
+        attributes: expect.objectContaining({
+          'next.span_name': 'initialize app render',
+          'next.span_type': AppRenderSpan.initializeRender,
+        }),
+      })
+    )
+    expect(phaseSpans[0].startTime).toBeLessThanOrEqual(parentSpan.timestamp)
+    expect(phaseSpans[0].durationMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('records Error and non-Error phase failures without throwing them', () => {
+    process.env.__NEXT_REQUEST_INSIGHTS = 'true'
+
+    const finishErrorPhase = createOneShotTracePhase(
+      AppRenderSpan.prepareAppPageResponse,
+      'prepare app page response'
+    )
+    finishErrorPhase({ error: new TypeError('prepare failed') })
+
+    const finishNonErrorPhase = createOneShotTracePhase(
+      AppRenderSpan.initializeRender,
+      'initialize app render'
+    )
+    finishNonErrorPhase({ error: 'initialize failed' })
+
+    expect(getSpanRecords({ name: 'prepare app page response' })[0]).toEqual(
+      expect.objectContaining({
+        status: 'error',
+        error: {
+          type: 'TypeError',
+          message: 'prepare failed',
+        },
+        events: [
+          expect.objectContaining({
+            name: 'exception',
+          }),
+        ],
+      })
+    )
+    expect(getSpanRecords({ name: 'initialize app render' })[0]).toEqual(
+      expect.objectContaining({
+        status: 'error',
+      })
+    )
   })
 
   it('records non-vanilla trace and wrapped spans for request insights', () => {

@@ -320,9 +320,19 @@ describe('request insights trace viewer', () => {
           },
         },
         {
+          name: 'BaseServer.renderToResponseWithComponents',
+          spanId: 'render-with-components',
+          parentSpanId: 'base-render',
+          startTime: 110.5,
+          durationMs: 84.5,
+          attributes: {
+            'next.span_type': 'BaseServer.renderToResponseWithComponents',
+          },
+        },
+        {
           name: 'prepare app page response',
           spanId: 'prepare-app-page',
-          parentSpanId: 'base-render',
+          parentSpanId: 'render-with-components',
           startTime: 111,
           durationMs: 1,
           attributes: {
@@ -332,7 +342,7 @@ describe('request insights trace viewer', () => {
         {
           name: 'initialize app render',
           spanId: 'initialize-app-render',
-          parentSpanId: 'base-render',
+          parentSpanId: 'render-with-components',
           startTime: 112,
           durationMs: 1,
           attributes: { 'next.span_type': 'AppRender.initializeRender' },
@@ -340,7 +350,7 @@ describe('request insights trace viewer', () => {
         {
           name: 'render route (app) /',
           spanId: 'render',
-          parentSpanId: 'base-render',
+          parentSpanId: 'render-with-components',
           startTime: 113,
           durationMs: 80,
           attributes: { 'next.span_type': 'AppRender.getBodyResult' },
@@ -413,6 +423,7 @@ describe('request insights trace viewer', () => {
       'render',
       'resolve page components',
       'load components',
+      'render to response with components',
       'prepare app page response',
       'initialize app render',
       'render route (app) /',

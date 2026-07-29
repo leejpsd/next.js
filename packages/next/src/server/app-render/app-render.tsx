@@ -112,6 +112,10 @@ import {
   getRequestInsightsIdentity,
   runWithRequestInsightsIdentity,
 } from '../lib/trace/request-insights-identity'
+import {
+  createOneShotTracePhase,
+  type FinishTracePhase,
+} from '../lib/trace/phase'
 import { getTracer, SpanStatusCode } from '../lib/trace/tracer'
 import { traceLocalSpan } from '../lib/trace/local-span-recorder'
 import { isRequestInsightsEnabled } from '../lib/trace/request-insights'
@@ -2572,7 +2576,8 @@ async function renderToHTMLOrFlightImpl(
   serverComponentsHmrCache: ServerComponentsHmrCache | undefined,
   sharedContext: AppSharedContext,
   interpolatedParams: Params,
-  fallbackRouteParams: OpaqueFallbackRouteParams | null
+  fallbackRouteParams: OpaqueFallbackRouteParams | null,
+  finishInitializeRender: FinishTracePhase
 ) {
   const isNotFoundPath = pagePath === '/404'
   if (isNotFoundPath) {
@@ -2798,6 +2803,7 @@ async function renderToHTMLOrFlightImpl(
       prerenderToStream
     )
 
+    finishInitializeRender()
     const response = await prerenderToStreamWithTracing(
       req,
       res,
@@ -2932,6 +2938,7 @@ async function renderToHTMLOrFlightImpl(
 
     // MARK: RSC request
     if (isRSCRequest) {
+      finishInitializeRender()
       if (isRuntimePrefetchRequest) {
         // MARK: RSC runtimePrefetch
         return generateRuntimePrefetchResult(
@@ -2971,6 +2978,7 @@ async function renderToHTMLOrFlightImpl(
     let didExecuteServerAction = false
     let formState: null | any = null
     if (isPossibleActionRequest) {
+      finishInitializeRender()
       // For action requests, we handle them differently with a special render result.
       const actionRequestResult = await handleAction({
         req,
@@ -2999,7 +3007,8 @@ async function renderToHTMLOrFlightImpl(
             postponedState,
             metadata,
             undefined, // Prevent restartable-render behavior in dev + Cache Components mode
-            fallbackParams
+            fallbackParams,
+            finishInitializeRender
           )
 
           return new RenderResult(stream, {
@@ -3041,7 +3050,8 @@ async function renderToHTMLOrFlightImpl(
       // and we currently we don't copy changes over when creating a new store,
       // so the restarted render wouldn't be correct.
       didExecuteServerAction ? undefined : createRequestStore,
-      fallbackParams
+      fallbackParams,
+      finishInitializeRender
     )
 
     // Forward an invalid-dynamic-usage error recorded by `'use cache'` only
@@ -3098,16 +3108,17 @@ export type AppPageRender = (
   sharedContext: AppSharedContext
 ) => Promise<RenderResult<AppPageRenderResultMetadata>>
 
-export const renderToHTMLOrFlight: AppPageRender = (
-  req,
-  res,
-  pagePath,
-  query,
-  fallbackRouteParams,
-  renderOpts,
-  serverComponentsHmrCache,
-  sharedContext
-) => {
+function renderToHTMLOrFlightWithInitialization(
+  req: BaseNextRequest,
+  res: BaseNextResponse,
+  pagePath: string,
+  query: NextParsedUrlQuery,
+  fallbackRouteParams: OpaqueFallbackRouteParams | null,
+  renderOpts: RenderOpts,
+  serverComponentsHmrCache: ServerComponentsHmrCache | undefined,
+  sharedContext: AppSharedContext,
+  finishInitializeRender: FinishTracePhase
+): ReturnType<AppPageRender> {
   if (!req.url) {
     throw new Error('Invalid URL')
   }
@@ -3194,8 +3205,49 @@ export const renderToHTMLOrFlight: AppPageRender = (
     serverComponentsHmrCache,
     sharedContext,
     interpolatedParams,
-    fallbackRouteParams
+    fallbackRouteParams,
+    finishInitializeRender
   )
+}
+
+export const renderToHTMLOrFlight: AppPageRender = (
+  req,
+  res,
+  pagePath,
+  query,
+  fallbackRouteParams,
+  renderOpts,
+  serverComponentsHmrCache,
+  sharedContext
+) => {
+  const finishInitializeRender = createOneShotTracePhase(
+    AppRenderSpan.initializeRender,
+    'initialize app render'
+  )
+
+  try {
+    const result = renderToHTMLOrFlightWithInitialization(
+      req,
+      res,
+      pagePath,
+      query,
+      fallbackRouteParams,
+      renderOpts,
+      serverComponentsHmrCache,
+      sharedContext,
+      finishInitializeRender
+    )
+
+    return result
+      .catch((renderError) => {
+        finishInitializeRender({ error: renderError })
+        throw renderError
+      })
+      .finally(() => finishInitializeRender())
+  } catch (renderError) {
+    finishInitializeRender({ error: renderError })
+    throw renderError
+  }
 }
 
 function applyMetadataFromPrerenderResult(
@@ -3265,7 +3317,8 @@ async function renderToStream(
   postponedState: PostponedState | null,
   metadata: AppPageRenderResultMetadata,
   createRequestStore: (() => RequestStore) | undefined,
-  fallbackParams: OpaqueFallbackRouteParams | null
+  fallbackParams: OpaqueFallbackRouteParams | null,
+  finishInitializeRender: FinishTracePhase
 ): Promise<AnyStream> {
   /* eslint-disable @next/internal/no-ambiguous-jsx -- React Client */
   // MARK: renderToStream setup
@@ -3364,6 +3417,8 @@ async function renderToStream(
       (bootstrapScriptContent ? `${bootstrapScriptContent};` : '') +
       (await getInstantTestBootstrapScriptContent())
   }
+
+  finishInitializeRender()
 
   // Create the "render route (app)" span manually so we can keep it open during streaming.
   // This is necessary because errors inside Suspense boundaries are reported asynchronously

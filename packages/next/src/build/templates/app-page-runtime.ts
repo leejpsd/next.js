@@ -16,13 +16,20 @@ import {
   SpanStatusCode,
   type Span,
 } from '../../server/lib/trace/tracer' with { 'turbopack-transition': 'next-server-utility' }
+import {
+  createOneShotTracePhase,
+  type FinishTracePhase,
+} from '../../server/lib/trace/phase' with { 'turbopack-transition': 'next-server-utility' }
 import type { RequestMeta } from '../../server/request-meta'
 import {
   addRequestMeta,
   getRequestMeta,
   setRequestMeta,
 } from '../../server/request-meta' with { 'turbopack-transition': 'next-server-utility' }
-import { BaseServerSpan } from '../../server/lib/trace/constants' with { 'turbopack-transition': 'next-server-utility' }
+import {
+  AppRenderSpan,
+  BaseServerSpan,
+} from '../../server/lib/trace/constants' with { 'turbopack-transition': 'next-server-utility' }
 import { stripFlightHeaders } from '../../server/app-render/strip-flight-headers' with { 'turbopack-transition': 'next-server-utility' }
 import {
   NodeNextRequest,
@@ -194,13 +201,14 @@ export function createAppPageEntrypoint({
 
   const normalizedSrcPage = normalizeAppPath(srcPage)
 
-  async function handler(
+  async function handleRequest(
     req: IncomingMessage,
     res: ServerResponse,
     ctx: {
       waitUntil?: (prom: Promise<void>) => void
       requestMeta?: RequestMeta
-    }
+    },
+    finishPrepareAppPageResponse: FinishTracePhase
   ) {
     if (ctx.requestMeta) {
       setRequestMeta(req, ctx.requestMeta)
@@ -744,6 +752,7 @@ export function createAppPageEntrypoint({
         const nextReq = new NodeNextRequest(req)
         const nextRes = new NodeNextResponse(res)
 
+        finishPrepareAppPageResponse()
         return routeModule.render(nextReq, nextRes, context).finally(() => {
           if (!span) return
 
@@ -2217,6 +2226,29 @@ export function createAppPageEntrypoint({
 
       // rethrow so that we can handle serving error page
       throw err
+    }
+  }
+
+  async function handler(
+    req: IncomingMessage,
+    res: ServerResponse,
+    ctx: {
+      waitUntil?: (prom: Promise<void>) => void
+      requestMeta?: RequestMeta
+    }
+  ) {
+    const finishPrepareAppPageResponse = createOneShotTracePhase(
+      AppRenderSpan.prepareAppPageResponse,
+      'prepare app page response'
+    )
+
+    try {
+      return await handleRequest(req, res, ctx, finishPrepareAppPageResponse)
+    } catch (error) {
+      finishPrepareAppPageResponse({ error })
+      throw error
+    } finally {
+      finishPrepareAppPageResponse()
     }
   }
 
