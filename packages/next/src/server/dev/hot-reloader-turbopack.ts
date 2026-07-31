@@ -1392,27 +1392,34 @@ export async function createHotReloaderTurbopack(
                 ...clientPaths,
               ])
             }
-          }
 
-          let actionManifestChanged = false
-          for (const key of ownerKeys) {
-            const { type, side, page } = splitEntryKey(key)
-            if (type !== 'app' || side !== 'server') continue
+            // Materializing a boundary can register new server actions, so reload the
+            // action manifest for the owning app entries and force their server modules to
+            // be re-required against the updated manifest. This is gated on a boundary
+            // actually being materialized (`clientPaths.length > 0`): otherwise every plain
+            // app-page client chunk request would clear the require cache and rewrite
+            // manifests, which both regresses dev performance and discards the server module
+            // state that surfaces errors (e.g. the dev overlay would stop opening).
+            let actionManifestChanged = false
+            for (const key of ownerKeys) {
+              const { type, side, page } = splitEntryKey(key)
+              if (type !== 'app' || side !== 'server') continue
 
-            manifestLoader.loadActionManifest(page)
-            actionManifestChanged = true
+              manifestLoader.loadActionManifest(page)
+              actionManifestChanged = true
 
-            const writtenEndpoint = currentWrittenEntrypoints.get(key)
-            if (writtenEndpoint) {
-              clearRequireCache(key, writtenEndpoint, { force: true })
+              const writtenEndpoint = currentWrittenEntrypoints.get(key)
+              if (writtenEndpoint) {
+                clearRequireCache(key, writtenEndpoint, { force: true })
+              }
             }
-          }
-          if (actionManifestChanged) {
-            manifestLoader.writeManifests({
-              devRewrites: opts.fsChecker.rewrites,
-              productionRewrites: undefined,
-              entrypoints: currentEntrypoints,
-            })
+            if (actionManifestChanged) {
+              manifestLoader.writeManifests({
+                devRewrites: opts.fsChecker.rewrites,
+                productionRewrites: undefined,
+                entrypoints: currentEntrypoints,
+              })
+            }
           }
         } catch (err) {
           // Serving falls through to the static path, which 404s if the chunk was never emitted.
