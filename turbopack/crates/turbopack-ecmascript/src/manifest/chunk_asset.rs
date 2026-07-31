@@ -11,7 +11,8 @@ use turbopack_core::{
     lazy_output_asset::LazyOutputAsset,
     module::{Module, ModuleSideEffects},
     module_graph::{
-        ModuleGraph, chunk_group_info::ChunkGroup, module_batch::ChunkableModuleOrBatch,
+        ModuleGraph, async_graph_materialization, chunk_group_info::ChunkGroup,
+        module_batch::ChunkableModuleOrBatch,
     },
     output::{OutputAsset, OutputAssets, OutputAssetsWithReferenced},
 };
@@ -62,13 +63,26 @@ impl ManifestAsyncModule {
     }
 
     #[turbo_tasks::function]
-    pub(super) fn chunk_group(&self) -> Vc<OutputAssetsWithReferenced> {
-        self.chunking_context.chunk_group_assets(
+    pub(super) async fn chunk_group(&self) -> Result<Vc<OutputAssetsWithReferenced>> {
+        // When the graph this was discovered in stops at async references, it cannot chunk this
+        // group: it does not contain what `inner` references. Root the group at `inner` instead, so
+        // the subgraph is walked here -- inside a task that only runs once the chunk is requested
+        // -- rather than while the route was compiling.
+        let module_graph = if *self
+            .chunking_context
+            .is_async_graph_deferral_enabled()
+            .await?
+        {
+            ModuleGraph::isolated_async_entry(Vc::upcast(*self.inner))
+        } else {
+            *self.module_graph
+        };
+        Ok(self.chunking_context.chunk_group_assets(
             self.inner.ident(),
             ChunkGroup::Async(ResolvedVc::upcast(self.inner)),
-            *self.module_graph,
+            module_graph,
             self.availability_info,
-        )
+        ))
     }
 
     /// A chunk list tracking the dynamic import's chunks for HMR, empty when HMR is disabled.
@@ -151,7 +165,12 @@ impl ManifestAsyncModule {
             .iter()
             .map(async |asset| {
                 Ok(ResolvedVc::upcast::<Box<dyn OutputAsset>>(
-                    LazyOutputAsset::new(**asset).to_resolved().await?,
+                    LazyOutputAsset::new(
+                        **asset,
+                        async_graph_materialization(*ResolvedVc::upcast(this.inner)),
+                    )
+                    .to_resolved()
+                    .await?,
                 ))
             })
             .try_join()
@@ -253,8 +272,27 @@ impl EcmascriptChunkPlaceable for ManifestAsyncModule {
         _chunking_context: Vc<Box<dyn ChunkingContext>>,
         _module_graph: Vc<ModuleGraph>,
         _async_module_info: Option<Vc<AsyncModuleInfo>>,
-        _estimated: bool,
+        estimated: bool,
     ) -> Result<Vc<EcmascriptChunkItemContent>> {
+        // Estimation only needs something of roughly the right shape to size a chunk with.
+        // Computing the real content here would compute the chunk group behind the
+        // boundary, which is the one thing this module exists to put off -- and it happens
+        // while the route compiles, so it would defeat the deferral entirely.
+        // `AsyncLoaderModule` guards the same way.
+        if estimated {
+            let code = formatdoc! {
+                r#"
+                    {TURBOPACK_EXPORT_VALUE}({:#});
+                "#,
+                StringifyJs(&Vec::<EcmascriptChunkData<'_>>::new())
+            };
+            return Ok(EcmascriptChunkItemContent {
+                inner_code: code.into(),
+                ..Default::default()
+            }
+            .cell());
+        }
+
         let chunks_data = self.chunks_data().await?;
         let chunks_data = chunks_data.iter().try_join().await?;
         let chunks_data: Vec<_> = chunks_data

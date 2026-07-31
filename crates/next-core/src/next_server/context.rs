@@ -1046,6 +1046,10 @@ pub struct ServerChunkingContextOptions {
     pub no_mangling: Vc<bool>,
     pub scope_hoisting: Vc<bool>,
     pub nested_async_chunking: Vc<bool>,
+    /// Whether the module graphs chunked here stop at async references. Must match the
+    /// `defer_async` they were built with, or the emitted chunk group misses everything below
+    /// the boundary.
+    pub defer_async_graph: Vc<bool>,
     pub debug_ids: Vc<bool>,
     pub client_root: FileSystemPath,
     pub client_static_folder_name: RcStr,
@@ -1074,6 +1078,7 @@ pub async fn get_server_chunking_context_with_client_assets(
         no_mangling,
         scope_hoisting,
         nested_async_chunking,
+        defer_async_graph,
         debug_ids,
         client_root,
         client_static_folder_name,
@@ -1134,6 +1139,9 @@ pub async fn get_server_chunking_context_with_client_assets(
     } else {
         SourceMapSourceType::RelativeUri
     });
+    if next_mode.is_development() {
+        builder = builder.defer_async_graph(*defer_async_graph.await?);
+    }
     if next_mode.is_production() {
         builder = builder
             .chunking_config(
@@ -1178,6 +1186,7 @@ pub async fn get_server_chunking_context(
         no_mangling,
         scope_hoisting,
         nested_async_chunking,
+        defer_async_graph,
         debug_ids,
         client_root,
         client_static_folder_name,
@@ -1237,7 +1246,9 @@ pub async fn get_server_chunking_context(
     .worker_forwarded_globals(worker_forwarded_globals());
 
     if next_mode.is_development() {
-        builder = builder.source_map_source_type(SourceMapSourceType::AbsoluteFileUri);
+        builder = builder
+            .source_map_source_type(SourceMapSourceType::AbsoluteFileUri)
+            .defer_async_graph(*defer_async_graph.await?);
     } else {
         builder = builder
             .source_map_source_type(SourceMapSourceType::RelativeUri)

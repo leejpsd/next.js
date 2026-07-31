@@ -728,6 +728,7 @@ impl PageEndpoint {
             let next_mode_ref = next_mode.await?;
             let should_trace = *project.should_write_nft_manifests().await?;
             let should_read_binding_usage = next_mode_ref.is_production();
+            let defer_async = *project.defer_async_graph().await?;
 
             let ssr_chunk_module = self.internal_ssr_chunk_module().await?;
             // Implements layout segment optimization to compute a graph "chain" for document, app,
@@ -746,6 +747,7 @@ impl PageEndpoint {
                     visited_modules,
                     should_trace,
                     should_read_binding_usage,
+                    defer_async,
                 );
                 graphs.push(graph);
                 visited_modules = VisitedModules::concatenate(visited_modules, graph);
@@ -759,6 +761,7 @@ impl PageEndpoint {
                 visited_modules,
                 should_trace,
                 should_read_binding_usage,
+                defer_async,
             );
             graphs.push(graph);
 

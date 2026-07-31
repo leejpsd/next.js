@@ -463,6 +463,22 @@ pub trait ChunkingContext {
         Vc::cell(false)
     }
 
+    /// Whether the module graphs this context chunks against stop at the target of an async
+    /// reference instead of containing what it references.
+    ///
+    /// When enabled, a chunk group for an async reference must be rooted at its own entry -- the
+    /// graph it was discovered in cannot chunk it, because it does not know what the entry
+    /// references. Doing that lazily is the point: the subgraph is not parsed until the chunk group
+    /// is actually computed.
+    ///
+    /// Must agree with the `defer_async` the graph was built with. A context that says `false`
+    /// while chunking a deferred graph emits a chunk group missing everything below the
+    /// boundary.
+    #[turbo_tasks::function]
+    fn is_async_graph_deferral_enabled(self: Vc<Self>) -> Vc<bool> {
+        Vc::cell(false)
+    }
+
     #[turbo_tasks::function]
     fn minify_type(self: Vc<Self>) -> Vc<MinifyType> {
         MinifyType::NoMinify.cell()

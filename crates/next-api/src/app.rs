@@ -890,6 +890,7 @@ impl AppProject {
             let next_mode_ref = next_mode.await?;
             let should_trace = *self.project.should_write_nft_manifests().await?;
             let should_read_binding_usage = next_mode_ref.is_production();
+            let defer_async = *self.project.defer_async_graph().await?;
 
             // Implements layout segment optimization to compute a graph "chain" for each layout
             // segment
@@ -937,6 +938,7 @@ impl AppProject {
                         visited_modules,
                         should_trace,
                         should_read_binding_usage,
+                        defer_async,
                     );
                     graphs.push(graph);
                     visited_modules = VisitedModules::concatenate(visited_modules, graph);
@@ -956,6 +958,7 @@ impl AppProject {
                             visited_modules,
                             should_trace,
                             should_read_binding_usage,
+                            false,
                         );
                         graphs.push(graph);
                         let is_layout = module.server_path().await?.file_stem() == Some("layout");
@@ -979,6 +982,7 @@ impl AppProject {
                     visited_modules,
                     should_trace,
                     should_read_binding_usage,
+                    defer_async,
                 );
                 graphs.push(graph);
                 visited_modules = VisitedModules::concatenate(visited_modules, graph);
@@ -990,6 +994,7 @@ impl AppProject {
                     visited_modules,
                     should_trace,
                     should_read_binding_usage,
+                    defer_async,
                 );
                 graphs.push(additional_module_graph);
 

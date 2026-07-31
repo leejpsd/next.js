@@ -1,3 +1,4 @@
+use anyhow::Result;
 use turbo_rcstr::RcStr;
 use turbo_tasks::{ResolvedVc, Vc};
 use turbo_tasks_fs::{FileContent, FileSystemPath};
@@ -5,6 +6,7 @@ use turbo_tasks_fs::{FileContent, FileSystemPath};
 use crate::{
     asset::{Asset, AssetContent},
     chunk::{OutputChunk, OutputChunkRuntimeInfo},
+    module_graph::AsyncGraphMaterialization,
     output::{OutputAsset, OutputAssetsReference, OutputAssetsWithReferenced},
     source_map::GenerateSourceMap,
     version::VersionedContent,
@@ -23,13 +25,21 @@ use crate::{
 #[turbo_tasks::value]
 pub struct LazyOutputAsset {
     inner: ResolvedVc<Box<dyn OutputAsset>>,
+    materialization: ResolvedVc<AsyncGraphMaterialization>,
 }
 
 #[turbo_tasks::value_impl]
 impl LazyOutputAsset {
     #[turbo_tasks::function]
-    pub fn new(inner: ResolvedVc<Box<dyn OutputAsset>>) -> Vc<Self> {
-        LazyOutputAsset { inner }.cell()
+    pub fn new(
+        inner: ResolvedVc<Box<dyn OutputAsset>>,
+        materialization: ResolvedVc<AsyncGraphMaterialization>,
+    ) -> Vc<Self> {
+        LazyOutputAsset {
+            inner,
+            materialization,
+        }
+        .cell()
     }
 }
 
@@ -41,6 +51,15 @@ impl LazyOutputAsset {
     /// per asset.
     pub fn is_lazy(asset: ResolvedVc<Box<dyn OutputAsset>>) -> bool {
         ResolvedVc::try_downcast_type::<LazyOutputAsset>(asset).is_some()
+    }
+
+    /// Marks the async graph behind `asset` as materialized. Returns false for ordinary assets.
+    pub async fn materialize(asset: ResolvedVc<Box<dyn OutputAsset>>) -> Result<bool> {
+        let Some(asset) = ResolvedVc::try_downcast_type::<LazyOutputAsset>(asset) else {
+            return Ok(false);
+        };
+        asset.await?.materialization.await?.materialize();
+        Ok(true)
     }
 }
 

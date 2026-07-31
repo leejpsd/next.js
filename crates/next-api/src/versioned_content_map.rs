@@ -315,6 +315,38 @@ impl VersionedContentMap {
             return Ok(Vc::cell(vec![]));
         }
 
+        // Invalidate every route graph that stopped at this target before expanding the chunk.
+        // Re-reading the owning operation then regenerates route metadata and server assets before
+        // the browser can evaluate the deferred code.
+        LazyOutputAsset::materialize(asset).await?;
+
+        let owner_entries = {
+            let this = self.await?;
+            let owners = this
+                .map_path_to_op
+                .get()
+                .0
+                .get(&path)
+                .map(|owners| owners.0.iter().copied().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let entries = this.map_op_to_compute_entry.get();
+            owners
+                .into_iter()
+                .filter_map(|owner| entries.get(&owner).copied())
+                .collect::<Vec<_>>()
+        };
+        for entry in owner_entries {
+            entry.connect().await?;
+        }
+
+        let result = self.raw_get(path.clone()).await?;
+        let Some(entry) = &*result else {
+            return Ok(Vc::cell(vec![]));
+        };
+        let Some(&asset) = entry.path_to_asset.get(&path) else {
+            return Ok(Vc::cell(vec![]));
+        };
+
         let assets_operation = lazy_asset_references_operation(asset);
         let compute_entry = compute_entry_operation(
             self.to_resolved().await?,

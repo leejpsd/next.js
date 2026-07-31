@@ -285,6 +285,7 @@ impl WebpackLoadersProcessedAsset {
                     entries.graph_entries().to_resolved().await?,
                     false,
                     false,
+                    false,
                 )],
                 None,
             )
@@ -757,6 +758,7 @@ impl EvaluateContext for WebpackLoaderContext {
                         modules: vec![module],
                         heuristics: EntryHeuristics::default(),
                     },
+                    false,
                     false,
                     false,
                 );

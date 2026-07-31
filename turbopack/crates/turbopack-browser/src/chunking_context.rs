@@ -134,6 +134,11 @@ impl BrowserChunkingContextBuilder {
         self
     }
 
+    pub fn defer_async_graph(mut self, defer_async_graph: bool) -> Self {
+        self.chunking_context.defer_async_graph = defer_async_graph;
+        self
+    }
+
     pub fn minify_type(mut self, minify_type: MinifyType) -> Self {
         self.chunking_context.minify_type = minify_type;
         self
@@ -366,6 +371,10 @@ pub struct BrowserChunkingContext {
     current_chunk_method: CurrentChunkMethod,
     /// Whether to use manifest chunks for lazy compilation
     manifest_chunks: bool,
+    /// Whether the module graphs chunked here stop at async references, so an async chunk group
+    /// has to be rooted at its own entry. Must match the `defer_async` the graph was built
+    /// with.
+    defer_async_graph: bool,
     /// The module id strategy to use
     module_id_strategy: Option<ResolvedVc<ModuleIdStrategy>>,
     /// The module export usage info, if available.
@@ -437,6 +446,7 @@ impl BrowserChunkingContext {
                 source_maps_type: SourceMapsType::Full,
                 current_chunk_method: CurrentChunkMethod::StringLiteral,
                 manifest_chunks: false,
+                defer_async_graph: false,
                 module_id_strategy: None,
                 export_usage: None,
                 unused_references: None,
@@ -837,6 +847,11 @@ impl ChunkingContext for BrowserChunkingContext {
     #[turbo_tasks::function]
     fn is_hot_module_replacement_enabled(&self) -> Vc<bool> {
         Vc::cell(self.enable_hot_module_replacement)
+    }
+
+    #[turbo_tasks::function]
+    fn is_async_graph_deferral_enabled(&self) -> Vc<bool> {
+        Vc::cell(self.defer_async_graph)
     }
 
     #[turbo_tasks::function]

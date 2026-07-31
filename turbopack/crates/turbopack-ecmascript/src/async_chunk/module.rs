@@ -83,6 +83,19 @@ impl AsyncLoaderModule {
                 .cell());
             }
         }
+        // See `ManifestAsyncModule::chunk_group`: a graph that stops at async references cannot
+        // chunk this group, so root it at `inner`. Unlike the manifest path this is not a lazy
+        // boundary, so the walk still happens while the referencing chunk is generated -- it just
+        // happens here instead of during graph construction.
+        let module_graph = if *self
+            .chunking_context
+            .is_async_graph_deferral_enabled()
+            .await?
+        {
+            ModuleGraph::isolated_async_entry(Vc::upcast(*self.inner))
+        } else {
+            module_graph
+        };
         Ok(self.chunking_context.chunk_group_assets(
             self.inner.ident(),
             ChunkGroup::Async(ResolvedVc::upcast(self.inner)),

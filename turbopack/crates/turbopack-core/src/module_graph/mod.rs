@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{Instrument, Level, Span};
 use turbo_rcstr::RcStr;
 use turbo_tasks::{
-    CollectiblesSource, FxIndexMap, NonLocalValue, OperationVc, ReadRef, ResolvedVc,
+    CollectiblesSource, FxIndexMap, NonLocalValue, OperationVc, ReadRef, ResolvedVc, State,
     TryFlatJoinIterExt, TryJoinIterExt, ValueToString, Vc,
     debug::ValueDebugFormat,
     graph::{AdjacencyMap, GraphTraversal, Visit, VisitControlFlow},
@@ -60,6 +60,33 @@ pub mod style_groups_loose;
 mod traced_di_graph;
 
 pub use self::module_batches::BatchingConfig;
+
+#[turbo_tasks::value]
+pub struct AsyncGraphMaterialization {
+    materialized: State<bool>,
+}
+
+impl AsyncGraphMaterialization {
+    pub fn is_materialized(&self) -> bool {
+        *self.materialized.get()
+    }
+
+    pub fn materialize(&self) {
+        self.materialized.set(true);
+    }
+}
+
+/// Returns the shared materialization state for an async module graph. The module argument gives
+/// each target its own memoized state cell.
+#[turbo_tasks::function]
+pub fn async_graph_materialization(
+    _module: ResolvedVc<Box<dyn Module>>,
+) -> Vc<AsyncGraphMaterialization> {
+    AsyncGraphMaterialization {
+        materialized: State::new(false),
+    }
+    .cell()
+}
 
 #[derive(
     Debug,
@@ -338,12 +365,13 @@ impl SingleModuleGraph {
         visited_modules: &FxIndexMap<ResolvedVc<Box<dyn Module>>, GraphNodeIndex>,
         include_traced: bool,
         include_binding_usage: bool,
+        defer_async: bool,
     ) -> Result<Vc<Self>> {
         let emit_spans = tracing::enabled!(Level::INFO);
         let root_nodes = entries
             .all_modules_with_is_traced()
             .map(|(e, is_traced)| {
-                SingleModuleGraphBuilderNode::new_module(emit_spans, e, is_traced)
+                SingleModuleGraphBuilderNode::new_module(emit_spans, e, is_traced, false)
             })
             .try_join()
             .await?;
@@ -356,6 +384,7 @@ impl SingleModuleGraph {
                     emit_spans,
                     include_traced,
                     include_binding_usage,
+                    defer_async,
                 },
             )
             .await
@@ -380,6 +409,9 @@ impl SingleModuleGraph {
                         module,
                         is_traced: _,
                         ident: _,
+                        // Only decides whether this node's references were walked; the node itself
+                        // is an ordinary module either way.
+                        defer_children: _,
                     } => (module, SingleModuleGraphNode::Module(module), 1),
                     SingleModuleGraphBuilderNode::VisitedModule { module, idx } => (
                         module,
@@ -825,6 +857,8 @@ impl ModuleGraph {
             vec![SingleModuleGraph::new_with_entry(
                 ChunkGroupEntry::Async(entry),
                 false,
+                false,
+                // This graph exists to chunk what the entry references, so it must walk it.
                 false,
             )],
             None,
@@ -1657,12 +1691,14 @@ impl SingleModuleGraph {
         entry: ChunkGroupEntry,
         include_traced: bool,
         include_binding_usage: bool,
+        defer_async: bool,
     ) -> Result<Vc<Self>> {
         SingleModuleGraph::new_inner(
             &GraphEntries::from_chunk_groups(vec![entry]),
             &Default::default(),
             include_traced,
             include_binding_usage,
+            defer_async,
         )
         .await
     }
@@ -1672,12 +1708,14 @@ impl SingleModuleGraph {
         entries: ResolvedVc<GraphEntries>,
         include_traced: bool,
         include_binding_usage: bool,
+        defer_async: bool,
     ) -> Result<Vc<Self>> {
         SingleModuleGraph::new_inner(
             &*entries.await?,
             &Default::default(),
             include_traced,
             include_binding_usage,
+            defer_async,
         )
         .await
     }
@@ -1688,12 +1726,14 @@ impl SingleModuleGraph {
         visited_modules: OperationVc<VisitedModules>,
         include_traced: bool,
         include_binding_usage: bool,
+        defer_async: bool,
     ) -> Result<Vc<Self>> {
         SingleModuleGraph::new_inner(
             &*entries.await?,
             &visited_modules.connect().await?.modules,
             include_traced,
             include_binding_usage,
+            defer_async,
         )
         .await
     }
@@ -1705,12 +1745,14 @@ impl SingleModuleGraph {
         visited_modules: OperationVc<VisitedModules>,
         include_traced: bool,
         include_binding_usage: bool,
+        defer_async: bool,
     ) -> Result<Vc<Self>> {
         SingleModuleGraph::new_inner(
             &entries,
             &visited_modules.connect().await?.modules,
             include_traced,
             include_binding_usage,
+            defer_async,
         )
         .await
     }
@@ -1775,6 +1817,13 @@ enum SingleModuleGraphBuilderNode {
         ident: Option<ReadRef<RcStr>>,
         /// whether this module is a tracing context
         is_traced: bool,
+        /// Whether this module was reached through a deferred async reference, in which case what
+        /// it references is not walked.
+        ///
+        /// Part of the node's identity on purpose: a module that is both statically imported and
+        /// dynamically imported is two builder nodes, so the static one still walks its references
+        /// while the dynamic one does not. Both collapse onto the same module in the built graph.
+        defer_children: bool,
     },
     /// A reference to a module that is already listed in visited_modules
     VisitedModule {
@@ -1788,6 +1837,7 @@ impl SingleModuleGraphBuilderNode {
         emit_spans: bool,
         module: ResolvedVc<Box<dyn Module>>,
         is_traced: bool,
+        defer_children: bool,
     ) -> Result<Self> {
         Ok(Self::Module {
             module,
@@ -1798,6 +1848,7 @@ impl SingleModuleGraphBuilderNode {
                 None
             },
             is_traced,
+            defer_children,
         })
     }
     fn new_visited_module(module: ResolvedVc<Box<dyn Module>>, idx: GraphNodeIndex) -> Self {
@@ -1813,6 +1864,24 @@ struct SingleModuleGraphBuilder<'a> {
     /// Whether to walk ChunkingType::Traced references
     include_traced: bool,
 
+    /// Whether to stop at the target of a ChunkingType::Async reference instead of walking what it
+    /// references.
+    ///
+    /// The target itself stays in the graph, and so does the edge to it: chunking needs that edge
+    /// to emit an async loader for the dynamic import, and a chunk group entry has to exist in
+    /// the graph it is computed against. Only what lies *below* the target is left out, which
+    /// is what makes the deferral worth anything -- a module is parsed when its references are
+    /// read, so a subgraph that is never walked is never parsed.
+    ///
+    /// Whoever chunks the deferred group must root it at the target rather than at this graph,
+    /// since this graph no longer knows what the target references. See
+    /// `ManifestAsyncModule::chunk_group` and `AsyncLoaderModule::chunk_group`.
+    ///
+    /// This assumes async references can be split into their own chunk group
+    /// ([`ChunkLoading::can_split_async`]). Under `ChunkLoading::SingleChunk` an async target is
+    /// chunked into the parent group, which would then be missing everything below it.
+    defer_async: bool,
+
     /// Whether to read ModuleReference::binding_usage()
     include_binding_usage: bool,
 }
@@ -1826,6 +1895,12 @@ impl Visit<SingleModuleGraphBuilderNode, RefData> for SingleModuleGraphBuilder<'
         _edge: Option<&RefData>,
     ) -> VisitControlFlow {
         match node {
+            // Reached through a deferred async reference: keep the node, leave what it references
+            // to whoever chunks the deferred group.
+            SingleModuleGraphBuilderNode::Module {
+                defer_children: true,
+                ..
+            } => VisitControlFlow::Skip,
             SingleModuleGraphBuilderNode::Module { .. } => VisitControlFlow::Continue,
             // Module was already visited previously
             SingleModuleGraphBuilderNode::VisitedModule { .. } => VisitControlFlow::Skip,
@@ -1845,6 +1920,7 @@ impl Visit<SingleModuleGraphBuilderNode, RefData> for SingleModuleGraphBuilder<'
         let emit_spans = self.emit_spans;
         let include_traced = self.include_traced;
         let include_binding_usage = self.include_binding_usage;
+        let defer_async = self.defer_async;
         async move {
             let refs_cell = if !is_traced {
                 primary_chunkable_referenced_modules(*module, include_traced, include_binding_usage)
@@ -1887,6 +1963,11 @@ impl Visit<SingleModuleGraphBuilderNode, RefData> for SingleModuleGraphBuilder<'
                     ) || is_traced
                 })
                 .map(async |(reference, ty, binding_usage, target)| {
+                    let defer_children = defer_async
+                        && matches!(ty, ChunkingType::Async)
+                        && !async_graph_materialization(*target)
+                            .await?
+                            .is_materialized();
                     let to = if let Some(idx) = visited_modules.get(&target) {
                         SingleModuleGraphBuilderNode::new_visited_module(target, *idx)
                     } else {
@@ -1894,6 +1975,7 @@ impl Visit<SingleModuleGraphBuilderNode, RefData> for SingleModuleGraphBuilder<'
                             emit_spans,
                             target,
                             is_traced || ty.is_traced(),
+                            defer_children,
                         )
                         .await?
                     };
@@ -2311,6 +2393,7 @@ pub mod tests {
                     .resolved_cell(),
                     false,
                     false,
+                    false,
                 );
 
                 let module_graph = ModuleGraph::from_graphs(
@@ -2323,6 +2406,7 @@ pub mod tests {
                             }])
                             .resolved_cell(),
                             VisitedModules::from_graph(parent_graph),
+                            false,
                             false,
                             false,
                         ),
@@ -2492,6 +2576,7 @@ pub mod tests {
                     .resolved_cell(),
                     true,
                     false,
+                    false,
                 );
 
                 let module_graph = ModuleGraph::from_graphs(
@@ -2505,6 +2590,7 @@ pub mod tests {
                             .resolved_cell(),
                             VisitedModules::from_graph(parent_graph),
                             true,
+                            false,
                             false,
                         ),
                     ],
@@ -2857,6 +2943,7 @@ pub mod tests {
                     }],
                     vec![],
                 )),
+                false,
                 false,
                 false,
             );

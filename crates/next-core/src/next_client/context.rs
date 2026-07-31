@@ -602,6 +602,7 @@ pub async fn get_client_chunking_context(
     if next_mode.is_development() {
         builder = builder
             .manifest_chunks(*lazy_dynamic_imports.await?)
+            .defer_async_graph(*lazy_dynamic_imports.await?)
             .hot_module_replacement()
             .source_map_source_type(SourceMapSourceType::AbsoluteFileUri)
             .dynamic_chunk_content_loading(true);

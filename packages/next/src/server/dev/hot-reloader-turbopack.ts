@@ -1348,10 +1348,7 @@ export async function createHotReloaderTurbopack(
         }
       }
 
-      if (
-        nextConfig.experimental.turbopackLazyDynamicImports &&
-        req.url?.startsWith('/_next/static/chunks/')
-      ) {
+      if (req.url?.startsWith('/_next/static/chunks/')) {
         // Materialize lazy dynamic-import boundaries, which emits the requested chunk and all its
         // siblings. Serving is left to the static path so a lazy chunk is indistinguishable from an
         // eagerly emitted one. Paths that are not lazy boundaries are a no-op.
@@ -1360,6 +1357,10 @@ export async function createHotReloaderTurbopack(
         // stable across edits, so an existing file is not necessarily a current one. Re-emitting an
         // unchanged chunk is already a no-op in the write effect.
         try {
+          const boundaryPath = decodeURIComponent(
+            req.url.split('?')[0].replace(/^\/_next\//, '')
+          )
+          const ownerKeys = assetMapper.getKeysByAsset(boundaryPath)
           const { clientPaths, issues } = await project.materializeLazyChunk(
             req.url
           )
@@ -1385,15 +1386,33 @@ export async function createHotReloaderTurbopack(
             // subscribed to by the browser and then silently ignored.
             // `assetMapper` keys assets by their path relative to the dist dir, which is what
             // the `/_next/` prefix maps to.
-            const boundaryPath = decodeURIComponent(
-              req.url.split('?')[0].replace(/^\/_next\//, '')
-            )
-            for (const key of assetMapper.getKeysByAsset(boundaryPath)) {
+            for (const key of ownerKeys) {
               assetMapper.setPathsForKey(key, [
                 ...assetMapper.getAssetPathsByKey(key),
                 ...clientPaths,
               ])
             }
+          }
+
+          let actionManifestChanged = false
+          for (const key of ownerKeys) {
+            const { type, side, page } = splitEntryKey(key)
+            if (type !== 'app' || side !== 'server') continue
+
+            manifestLoader.loadActionManifest(page)
+            actionManifestChanged = true
+
+            const writtenEndpoint = currentWrittenEntrypoints.get(key)
+            if (writtenEndpoint) {
+              clearRequireCache(key, writtenEndpoint, { force: true })
+            }
+          }
+          if (actionManifestChanged) {
+            manifestLoader.writeManifests({
+              devRewrites: opts.fsChecker.rewrites,
+              productionRewrites: undefined,
+              entrypoints: currentEntrypoints,
+            })
           }
         } catch (err) {
           // Serving falls through to the static path, which 404s if the chunk was never emitted.

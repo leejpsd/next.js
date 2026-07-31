@@ -1261,6 +1261,28 @@ impl Project {
         Ok(Vc::cell(*self.mode.await? == NextMode::Development))
     }
 
+    /// Whether module graphs stop at the target of an async reference, leaving the subgraph behind
+    /// a dynamic `import()` unwalked until its chunk group is computed.
+    ///
+    /// Development only, and only with `experimental.turbopackLazyDynamicImports`. Production
+    /// assigns module ids and reads binding usage from the whole graph, neither of which survives a
+    /// graph that stops early. Every chunking context that chunks these graphs must report the same
+    /// value from `is_async_graph_deferral_enabled`.
+    #[turbo_tasks::function]
+    pub(super) async fn defer_async_graph(self: Vc<Self>) -> Result<Vc<bool>> {
+        let this = self.await?;
+        Ok(Vc::cell(
+            *this.mode.await? == NextMode::Development
+                && *this
+                    .next_config
+                    .turbopack_lazy_dynamic_imports()
+                    .await?
+                // Tracing walks the graph to collect the files that go into the nft manifests, so a
+                // graph that stops at async references would under-report them.
+                && !*self.should_write_nft_manifests().await?,
+        ))
+    }
+
     #[turbo_tasks::function]
     pub(super) fn encryption_key(&self) -> Vc<RcStr> {
         Vc::cell(self.encryption_key.clone())
@@ -1512,6 +1534,7 @@ impl Project {
                     },
                     /* include_traced */ *self.should_write_nft_manifests().await?,
                     /* include_binding_usage */ self.next_mode().await?.is_production(),
+                    /* defer_async */ *self.defer_async_graph().await?,
                 )],
                 None,
             )
@@ -1542,6 +1565,7 @@ impl Project {
                     .resolved_cell(),
                     /* include_traced */ *self.should_write_nft_manifests().await?,
                     /* include_binding_usage */ self.next_mode().await?.is_production(),
+                    /* defer_async */ *self.defer_async_graph().await?,
                 )],
                 None,
             )
@@ -1735,6 +1759,7 @@ impl Project {
             nested_async_chunking: self
                 .next_config()
                 .turbo_nested_async_chunking(self.next_mode(), false),
+            defer_async_graph: self.defer_async_graph(),
             debug_ids: self.next_config().turbopack_debug_ids(),
             client_root: self.client_relative_path().owned().await?,
             client_static_folder_name: self
@@ -2885,10 +2910,12 @@ async fn whole_app_module_graph_operation(
         let next_mode = project.next_mode();
         let should_trace = *project.should_write_nft_manifests().await?;
         let should_read_binding_usage = next_mode.await?.is_production();
+        let defer_async = *project.defer_async_graph().await?;
         let base_single_module_graph = SingleModuleGraph::new_with_entries(
             project.get_all_entries().to_resolved().await?,
             should_trace,
             should_read_binding_usage,
+            defer_async,
         );
         let base_visited_modules = VisitedModules::from_graph(base_single_module_graph);
 
@@ -2918,6 +2945,7 @@ async fn whole_app_module_graph_operation(
             base_visited_modules,
             should_trace,
             should_read_binding_usage,
+            defer_async,
         );
 
         if !span.is_disabled() {
