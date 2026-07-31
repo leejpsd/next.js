@@ -1,4 +1,9 @@
 import type { ComponentType, ErrorInfo, JSX, ReactNode } from 'react'
+import {
+  convertFlightDataPathsToPartialTransportData,
+  convertInitialFlightDataToFullTransportData,
+} from './transport-adapter'
+import type { PartialTransportData } from '../../shared/lib/rsc-transport'
 import type { RenderOpts, PreloadCallbacks } from './types'
 import type {
   ActionResult,
@@ -8,9 +13,8 @@ import type {
   CacheNodeSeedData,
   RSCPayload,
   NavigationFlightResponse,
-  FlightData,
+  ActionFlightResponse,
   InitialRSCPayload,
-  FlightDataPath,
   PrefetchHints,
 } from '../../shared/lib/app-router-types'
 import { PrefetchHint } from '../../shared/lib/app-router-types'
@@ -660,14 +664,11 @@ async function generateDynamicRSCPayload(
     runtimePrefetchStream?: ReadableStream<Uint8Array>
   }
 ): Promise<RSCPayload> {
-  // Flight data that is going to be passed to the browser.
-  // Currently a single item array but in the future multiple patches might be combined in a single request.
-
-  // We initialize `flightData` to an empty string because the client router knows how to tolerate
-  // it (treating it as an MPA navigation). The only time this function wouldn't generate flight data
-  // is for server actions, if the server action handler instructs this function to skip it. When the server
-  // action reducer sees a falsy value, it'll simply resolve the action with no data.
-  let flightData: FlightData = ''
+  // Transport data that is going to be passed to the browser. Undefined when
+  // the response renders nothing: server actions, if the server action
+  // handler instructs this function to skip rendering. When the server action
+  // reducer sees an absent tree, it resolves the action with no data.
+  let transportData: PartialTransportData | undefined = undefined
 
   const {
     componentMod: {
@@ -731,7 +732,7 @@ async function generateDynamicRSCPayload(
       })
     )
 
-    flightData = (
+    const flightDataPaths = (
       needsFullTree
         ? await createFullTreeFlightDataForNavigation({
             ctx,
@@ -758,6 +759,13 @@ async function generateDynamicRSCPayload(
             hintTree: ctx.renderOpts.prefetchHints?.[ctx.pagePath] ?? null,
           })
     ).map((path) => path.slice(1)) // remove the '' (root) segment
+
+    if (flightDataPaths.length > 0) {
+      transportData = convertFlightDataPathsToPartialTransportData(
+        flightDataPaths,
+        getMetadataVaryParamsAccumulator()
+      )
+    }
   }
 
   // In dev, the Vary header may not reliably reflect whether a route can
@@ -772,26 +780,30 @@ async function generateDynamicRSCPayload(
   // We can rely on this because `ActionResult` will always be a promise, even if
   // the result is falsey.
   if (options?.actionResult) {
-    return maybeAppendBuildIdToRSCPayload(ctx, {
+    const actionResponse: ActionFlightResponse = {
       a: options.actionResult,
-      f: flightData,
       q: getRenderedSearch(query),
       i: !!couldBeIntercepted,
-    })
+    }
+    if (transportData !== undefined) {
+      actionResponse.t = transportData
+    }
+    return maybeAppendBuildIdToRSCPayload(ctx, actionResponse)
   }
 
   // Otherwise, it's a regular RSC response.
   const baseResponse: NavigationFlightResponse = maybeAppendBuildIdToRSCPayload(
     ctx,
     {
-      f: flightData,
       q: getRenderedSearch(query),
       i: !!couldBeIntercepted,
       S: workStore.isStaticGeneration,
-      h: getMetadataVaryParamsAccumulator(),
       r: getRootParamsVaryParamsAccumulator() ?? undefined,
     }
   )
+  if (transportData !== undefined) {
+    baseResponse.t = transportData
+  }
 
   if (options?.staleTimeIterable !== undefined) {
     baseResponse.s = options.staleTimeIterable
@@ -2187,14 +2199,13 @@ async function getRSCPayload(
     c: prepareInitialCanonicalUrl(url),
     q: getRenderedSearch(query),
     i: !!couldBeIntercepted,
-    f: [
-      [
-        initialTree,
-        seedData,
-        initialHead,
-        isPossiblyPartialHead,
-      ] as FlightDataPath,
-    ],
+    t: convertInitialFlightDataToFullTransportData(
+      initialTree,
+      seedData,
+      initialHead,
+      isPossiblyPartialHead,
+      getMetadataVaryParamsAccumulator()
+    ),
     m: missingSlots,
     G: [GlobalError, globalErrorStyles],
     // Tells the client whether this route supports per-segment prefetching.
@@ -2202,7 +2213,6 @@ async function getRSCPayload(
     // static pages do, because their per-segment prefetch responses are
     // generated during static generation (build or ISR).
     S: workStore.isStaticGeneration || ctx.renderOpts.cacheComponents,
-    h: getMetadataVaryParamsAccumulator(),
     r: getRootParamsVaryParamsAccumulator() ?? undefined,
     s: staleTimeIterable,
     a: shellByteLengthPromise,
@@ -2345,21 +2355,19 @@ async function getErrorRSCPayload(
     q: getRenderedSearch(query),
     m: undefined,
     i: false,
-    f: [
-      [
-        initialTree,
-        seedData,
-        initialHead,
-        isPossiblyPartialHead,
-      ] as FlightDataPath,
-    ],
+    t: convertInitialFlightDataToFullTransportData(
+      initialTree,
+      seedData,
+      initialHead,
+      isPossiblyPartialHead,
+      getMetadataVaryParamsAccumulator()
+    ),
     G: [GlobalError, globalErrorStyles],
     // Tells the client whether this route supports per-segment prefetching.
     // With Cache Components, all routes support it. Without it, only fully
     // static pages do, because their per-segment prefetch responses are
     // generated during static generation (build or ISR).
     S: workStore.isStaticGeneration || ctx.renderOpts.cacheComponents,
-    h: getMetadataVaryParamsAccumulator(),
     r: getRootParamsVaryParamsAccumulator() ?? undefined,
   } satisfies InitialRSCPayload)
 }
