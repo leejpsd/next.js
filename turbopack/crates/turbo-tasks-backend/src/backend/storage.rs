@@ -558,40 +558,56 @@ impl Storage {
         persistent
     }
 
-    /// Collects the ids of resident, non-transient tasks whose storage passes the cheap
-    /// [`TaskStorage::gc_maybe_collectible`] pre-filter. GC calls this to seed a collection pass by
-    /// scanning the resident map (each `TaskStorage` is a handful of field reads under a shard read
-    /// lock, the same shape as the eviction scan), then re-validates each candidate authoritatively
-    /// under a guard. The scan only sees resident tasks; disk-only garbage is collected after it is
-    /// next restored.
+    /// Scans the resident map for GC, returning two sets of non-transient task ids:
     ///
-    /// Parallelized across shards like [`Self::evict_after_snapshot`]: one job per shard scans it
-    /// under its own read lock and returns that shard's candidates, which are flattened into a
-    /// single list.
-    pub fn gc_collectible_candidates(&self) -> (usize, impl IntoIterator<Item = TaskId>) {
+    /// - **candidates**: tasks whose storage passes the cheap [`TaskStorage::gc_maybe_collectible`]
+    ///   pre-filter (no parent, no transient ref, quiescent). GC seeds the collection pass with
+    ///   these and re-validates each authoritatively under a guard.
+    /// - **roots**: durable roots ([`TaskStorage::gc_is_root`]) — `parent_count == 0` **and**
+    ///   anchored from outside the graph (`transient_ref_count > 0`), such as the pinned
+    ///   `ProjectContainer` op or a live endpoint. GC uses these to maintain the persisted roots
+    ///   map (refresh their last-anchored timestamp / age out orphans).
+    ///
+    /// The two sets are **disjoint**: a `parent_count == 0` task either has an anchor (a root) or
+    /// does not (a collectible candidate — ordinary garbage). GC never treats one as both.
+    ///
+    /// The scan sees only resident tasks; disk-only roots are carried in the persisted roots map
+    /// from a prior session and reconciled there. Parallelized across shards like
+    /// [`Self::evict_after_snapshot`]: one job per shard scans it under its own read lock; the
+    /// per-shard results are flattened.
+    pub fn gc_scan_candidates(&self) -> (Vec<TaskId>, Vec<TaskId>) {
         let per_shard: Vec<_> = parallel::map_collect(self.map.shards(), |shard| {
             let shard = shard.read();
             let mut candidates = Vec::new();
-            let mut roots_found = 0usize;
+            let mut roots = Vec::new();
             // SAFETY: we hold the shard read lock for the duration of iteration.
             for bucket in unsafe { shard.iter() } {
                 // SAFETY: the read lock guard outlives the bucket reference.
                 let (task_id, shared_value) = unsafe { bucket.as_ref() };
-                if !task_id.is_transient() {
-                    if shared_value.get().gc_maybe_collectible() {
-                        candidates.push(*task_id);
-                    } else if shared_value.get().flags.gc_root() {
-                        roots_found += 1;
-                    }
+                if task_id.is_transient() {
+                    continue;
+                }
+                let storage = shared_value.get();
+                if storage.gc_maybe_collectible() {
+                    candidates.push(*task_id);
+                }
+                // A durable root: no persistent parent, but anchored from outside the graph
+                // (`transient_ref_count > 0`) — the anchor is what keeps it alive and separates a
+                // root from ordinary garbage (a parent-less, unanchored task is a `candidate`
+                // above, not a root). Disk-only roots aren't discovered here; they
+                // ride the carried-forward roots map, which is where a root whose
+                // anchor later drops is aged out.
+                if storage.gc_is_root() {
+                    roots.push(*task_id);
                 }
             }
-            (candidates, roots_found)
+            (candidates, roots)
         });
-        let total: usize = per_shard.iter().map(|(_, r)| *r).sum();
-        (
-            total,
-            per_shard.into_iter().map(|(t, _)| t.into_iter()).flatten(),
-        )
+        // Split the per-shard pairs into two `Vec<Vec<_>>` in one consuming pass, then flatten each
+        // (moving, not cloning, the inner vecs).
+        let (candidates, roots): (Vec<Vec<TaskId>>, Vec<Vec<TaskId>>) =
+            per_shard.into_iter().unzip();
+        (candidates.concat(), roots.concat())
     }
 
     pub fn access_pair_mut(
