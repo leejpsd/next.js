@@ -198,12 +198,17 @@ impl TurboTasksBackend {
             // `All` restores Data so the edge capture below can read the Data-category dep sets.
             // The collect target came from the resident-map scan, so it must exist.
             let mut task = ctx.task(task_id, TaskDataCategory::All);
-            debug_assert!(
-                task.is_gc_collectible(),
-                "gc: GcJob({task_id}) for a non-collectible task — the seed scan's Meta-resident \
-                 `gc_maybe_collectible` filter and the cascade's collectibility check should \
-                 guarantee collectibility under the GC phase"
-            );
+            // Collectibility was checked when this job was seeded (the resident scan, the aged-out
+            // revalidation, or the cascade's per-child `is_gc_collectible` at spawn), but jobs run
+            // **concurrently** under `scope_unbounded`: a sibling job's cascade can flip this task
+            // non-collectible in between (regain `activeness`/`in_progress`, gain an aggregation
+            // edge, or — critically — pick up a new anchor). Re-check under the guard we now hold
+            // and skip rather than delete; a task that is still genuinely garbage is re-selected by
+            // a later pass, so bailing here is safe and self-healing. (Deleting unconditionally
+            // would wrongly collect a task that just regained an anchor.)
+            if !task.is_gc_collectible() {
+                return;
+            }
 
             // Mark the task soft-deleted on the guard we already hold (order relative to the
             // `CleanupOldEdges` run below doesn't matter — `deleted` only affects
