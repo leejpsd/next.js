@@ -156,6 +156,13 @@ export class NextInstance {
         '.next-profiles',
         '.DS_Store',
       ])
+      // `files: __dirname` points at both the fixture and its Jest runner.
+      // Keep runner files out of the generated Next.js application.
+      const isCurrentTestDirectory =
+        process.env.TEST_FILE_PATH &&
+        path.resolve(path.dirname(process.env.TEST_FILE_PATH)) ===
+          path.resolve(files.fsPath)
+      const testRunnerFileRegex = /\.test\.(?:js|jsx|ts|tsx)$/
       await fs.cp(files.fsPath, testDir, {
         recursive: true,
         // By default Node.js turns relative symlinks into absolute symlinks.
@@ -165,10 +172,15 @@ export class NextInstance {
         // See https://nodejs.org/api/fs.html#fscpsrc-dest-options-callback
         verbatimSymlinks: true,
         filter(source) {
-          const topLevel = path
-            .relative(files.fsPath, source)
-            .split(path.sep)[0]
-          return !skippedRelativePaths.has(topLevel)
+          const relativePath = path.relative(files.fsPath, source)
+          const relativeParts = relativePath.split(path.sep)
+          const topLevel = relativeParts[0]
+          const isTopLevelTestFile =
+            isCurrentTestDirectory &&
+            relativeParts.length === 1 &&
+            testRunnerFileRegex.test(topLevel)
+
+          return !skippedRelativePaths.has(topLevel) && !isTopLevelTestFile
         },
       })
     } else {
